@@ -1,7 +1,12 @@
 """
-<plugin key="Tibber" name="Tibber 1.01" author="Processware" version="1.01" wikilink="https://github.com/me-processware/Tibber-Domoticz" externallink="">
+<plugin key="Tibber" name="Tibber 1.02" author="Processware" version="1.02" wikilink="https://github.com/me-processware/Tibber-Domoticz" externallink="">
     <description>
         <h2>Tibber API is used to fetch data from Tibber.com</h2><br/>
+        <h3>Changelog</h3>
+        <ul style="list-style-type:square">
+            <li>v1.02 - Added configurable timezone support and improved price calculations</li>
+            <li>v1.01 - Initial release</li>
+        </ul>
         <h3>Configuration</h3>
         <h3>Support Development</h3>
         <div style="display: flex; align-items: center;">
@@ -47,6 +52,15 @@
                 <option label="No" value="No"/>
             </options>
         </param>
+        <param field="Mode7" label="Timezone" width="200px">
+            <options>
+                <option label="Europe/Amsterdam" value="Europe/Amsterdam" default="true"/>
+                <option label="Europe/London" value="Europe/London"/>
+                <option label="Europe/Berlin" value="Europe/Berlin"/>
+                <option label="Europe/Oslo" value="Europe/Oslo"/>
+                <option label="Europe/Stockholm" value="Europe/Stockholm"/>
+            </options>
+        </param>
     </params>
 </plugin>
 
@@ -62,6 +76,7 @@ import asyncio
 import time
 import random
 from datetime import datetime
+import pytz
 from gql import Client, gql
 from gql.transport.websockets import WebsocketsTransport
 
@@ -120,12 +135,14 @@ class BasePlugin:
         self.HomeID = Parameters["Mode4"]
         self.CreateRealTime = Parameters["Mode5"]
         self.EnableLogging = Parameters["Mode6"]
+        # Set default timezone if Mode7 is not available
+        self.Timezone = Parameters.get("Mode7", "Europe/Amsterdam")
 
         self.headers = {
             'Host': 'api.tibber.com',
             'Authorization': 'Bearer ' + self.AccessToken,  # Tibber Token
             'Content-Type': 'application/json',
-            'User-Agent': 'Domoticz/2024.08.22 TibberPlugin/1.01'  # Updated User-Agent
+            'User-Agent': 'Domoticz/2024.08.22 TibberPlugin/1.02'  # Updated User-Agent
         }
 
         # Validate the Tibber Access Token by making a simple API call before proceeding
@@ -222,7 +239,12 @@ class BasePlugin:
     def fetch_price_info(self):
         """
         Fetches price information using the Tibber API and updates corresponding devices.
+        Uses Europe/Amsterdam timezone for correct price calculations.
         """
+        # Set timezone based on configuration
+        local_tz = pytz.timezone(self.Timezone)
+        now = datetime.now(local_tz)
+        
         query = """
         query {
           viewer {
@@ -268,12 +290,21 @@ class BasePlugin:
                 if self.EnableLogging == "Yes":
                     Domoticz.Log(f"Fetched Price Information: {json.dumps(price_info, indent=2)}")
 
+                # Calculate daily average price (mean)
+                today_prices = price_info['today']
+                total_price = sum(price['total'] for price in today_prices)
+                mean_price = total_price / len(today_prices) if today_prices else 0
+
+                # Find minimum and maximum prices
+                min_price = min((price['total'] for price in today_prices), default=0)
+                max_price = max((price['total'] for price in today_prices), default=0)
+
                 # Update devices with the fetched price information
                 UpdateDevice('Current Price', round(price_info['current']['total'], 3))
-                UpdateDevice('Mean Price', round(price_info['today'][0]['total'], 3))
-                UpdateDevice('Current Price excl. fee', round(price_info['today'][0]['energy'], 3))  # Corrected name
-                UpdateDevice('Minimum Price', round(price_info['today'][0]['tax'], 3))
-                UpdateDevice('Maximum Price', round(price_info['today'][-1]['total'], 3))
+                UpdateDevice('Mean Price', round(mean_price, 3))
+                UpdateDevice('Current Price excl. fee', round(price_info['current']['energy'], 3))
+                UpdateDevice('Minimum Price', round(min_price, 3))
+                UpdateDevice('Maximum Price', round(max_price, 3))
 
                 # Check if data for tomorrow is available
                 if price_info['tomorrow']:
