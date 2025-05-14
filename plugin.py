@@ -1,9 +1,10 @@
 """
-<plugin key="Tibber" name="Tibber 1.02" author="Processware" version="1.02" wikilink="https://github.com/me-processware/Tibber-Domoticz" externallink="">
+<plugin key="Tibber" name="Tibber 1.03" author="Processware" version="1.03" wikilink="https://github.com/me-processware/Tibber-Domoticz" externallink="">
     <description>
         <h2>Tibber API is used to fetch data from Tibber.com</h2><br/>
         <h3>Changelog</h3>
         <ul style="list-style-type:square">
+            <li>v1.03 - Changed price update to 15 minutes</li>
             <li>v1.02 - Added configurable timezone support and improved price calculations</li>
             <li>v1.01 - Initial release</li>
         </ul>
@@ -38,7 +39,7 @@
         <h4>Default Tibber Access Token and Home ID are demo copied from &<a href="https://developer.tibber.com/explorer">https://developer.tibber.com/explorer</a></h4><br/>
     </description>
     <params>
-        <param field="Mode1" label="Tibber Access Token" width="460px" required="true" default="5K4MVS-OjfWhK_4yrjOlFe1F6kJXPVf7eQYggo8ebAE"/>
+        <param field="Mode1" label="Tibber Access Token" width="460px" required="true" default="3A77EECF61BD445F47241A5A36202185C35AF3AF58609E19B53F3A8872AD7BE1-1"/>
         <param field="Mode4" label="Home ID" width="350px" required="false" default="96a14971-525a-4420-aae9-e5aedaa129ff"/>
         <param field="Mode5" label="Create device for Pulse/Watty" width="50px">
             <options>
@@ -84,14 +85,15 @@ class BasePlugin:
     enabled = False
 
     def __init__(self):
-        self.retry_delay = 1  # Initial delay for exponential backoff
+        self.retry_delay = 5  # Initial delay for exponential backoff, increased to avoid rate limits
         self.max_retries = 5  # Maximum retries
         self.retry_count = 0
-        self.max_retry_delay = 60  # Maximum retry delay
+        self.max_retry_delay = 300  # Maximum retry delay increased to 5 minutes
         self.web_socket_thread = None  # Thread to handle WebSocket
         self.stop_thread = threading.Event()  # Event to signal the WebSocket thread to stop
         self.loop = None  # Event loop for the WebSocket thread
         self.last_fetch_hour = None  # Track the last hour of data fetch
+        self.last_fetch_minute = None  # Track the last minute of data fetch
         self.connection_count = 0  # Counter for WebSocket connections
         self.reconnect_count = 0  # Counter for WebSocket reconnects
 
@@ -103,46 +105,45 @@ class BasePlugin:
             self.web_socket_thread.join(timeout=10)  # Ensure the WebSocket thread stops
 
         # Disconnect all active connections
-        if self.GetDataCurrent.Connected() or self.GetDataCurrent.Connecting():
-            self.GetDataCurrent.Disconnect()
-        if self.GetDataMiniMaxMean.Connected() or self.GetDataMiniMaxMean.Connecting():
-            self.GetDataMiniMaxMean.Disconnect()
-        if self.CheckRealTimeHardware.Connected() or self.CheckRealTimeHardware.Connecting():
-            self.CheckRealTimeHardware.Disconnect()
-        if self.GetHomeID.Connected() or self.GetHomeID.Connecting():
-            self.GetHomeID.Disconnect()
-        if self.GetHouseNumber.Connected() or self.GetHouseNumber.Connecting():
-            self.GetHouseNumber.Disconnect()
+        self.disconnect_all()
 
         # Handle stopping of the event loop safely
         if self.loop is not None:
-            self.loop.call_soon_threadsafe(self.loop.stop)  # Stop the event loop safely
-            pending = asyncio.all_tasks(self.loop)
-            for task in pending:
-                task.cancel()
-                try:
-                    self.loop.run_until_complete(task)
-                except asyncio.CancelledError:
-                    pass
-            self.loop.close()
-            self.loop = None  # Reset the loop reference
+            try:
+                self.loop.call_soon_threadsafe(self.loop.stop)  # Stop the event loop safely
+                pending = asyncio.all_tasks(self.loop)
+                for task in pending:
+                    task.cancel()
+                    try:
+                        self.loop.run_until_complete(task)
+                    except asyncio.CancelledError:
+                        pass
+                self.loop.close()
+            except Exception as e:
+                Domoticz.Error(f"Error closing event loop: {str(e)}")
+            finally:
+                self.loop = None  # Reset the loop reference
 
         Domoticz.Log("Plugin stopped.")
 
     def onStart(self):
         Domoticz.Log("onStart")
+        global Parameters
         self.AccessToken = Parameters["Mode1"]
         self.HomeID = Parameters["Mode4"]
         self.CreateRealTime = Parameters["Mode5"]
         self.EnableLogging = Parameters["Mode6"]
         # Set default timezone if Mode7 is not available
         self.Timezone = Parameters.get("Mode7", "Europe/Amsterdam")
+        # Set price update interval to 15 minutes by default
+        self.PriceUpdateInterval = "15Minutes"
+        Domoticz.Log("Price update interval set to every 15 minutes by default")
 
         self.headers = {
             'Host': 'api.tibber.com',
             'Authorization': 'Bearer ' + self.AccessToken,  # Tibber Token
             'Content-Type': 'application/json',
-            'User-Agent': 'Domoticz/2024.08.22 TibberPlugin/1.02'  # Updated User-Agent
+            'User-Agent': 'Domoticz/2024.08.22 TibberPlugin/1.03'  # Updated User-Agent
         }
 
         # Validate the Tibber Access Token by making a simple API call before proceeding
@@ -150,13 +151,14 @@ class BasePlugin:
             Domoticz.Error("Invalid Tibber Access Token. Please check your credentials.")
             return
 
+        # Initialize connections
         self.GetHomeID = Domoticz.Connection(Name="Get HomeID", Transport="TCP/IP", Protocol="HTTPS", Address="api.tibber.com", Port="443")
-        if not _plugin.GetHomeID.Connected() and not _plugin.GetHomeID.Connecting() and not self.HomeID:
-            _plugin.GetHomeID.Connect()
+        if not self.GetHomeID.Connected() and not self.GetHomeID.Connecting() and not self.HomeID:
+            self.GetHomeID.Connect()
 
         self.GetHouseNumber = Domoticz.Connection(Name="Get House Number", Transport="TCP/IP", Protocol="HTTPS", Address="api.tibber.com", Port="443")
-        if not _plugin.GetHouseNumber.Connected() and not _plugin.GetHouseNumber.Connecting() and self.HomeID:
-            _plugin.GetHouseNumber.Connect()
+        if not self.GetHouseNumber.Connected() and not self.GetHouseNumber.Connecting() and self.HomeID:
+            self.GetHouseNumber.Connect()
 
         self.CheckRealTimeHardware = Domoticz.Connection(Name="Check Real Time Hardware", Transport="TCP/IP", Protocol="HTTPS", Address="api.tibber.com", Port="443")
         self.GetDataCurrent = Domoticz.Connection(Name="Get Current", Transport="TCP/IP", Protocol="HTTPS", Address="api.tibber.com", Port="443")
@@ -178,8 +180,126 @@ class BasePlugin:
     def onConnect(self, Connection, Status, Description):
         if Status == 0:  # Successful connection
             Domoticz.Log(f"Successfully connected to {Connection.Name}")
+            # Handle specific connection logic based on connection name
+            if Connection.Name == "Get HomeID":
+                self.send_home_id_query(Connection)
+            elif Connection.Name == "Get House Number":
+                self.send_house_number_query(Connection)
+            elif Connection.Name == "Check Real Time Hardware":
+                self.check_realtime_hardware(Connection)
+            elif Connection.Name == "Get Current":
+                self.fetch_price_info()
+            elif Connection.Name == "Get MiniMaxMean":
+                self.fetch_price_info()
         else:
             Domoticz.Error(f"Failed to connect to {Connection.Name}: {Description}")
+
+    def onMessage(self, Connection, Data):
+        """
+        Handle incoming data from connections.
+        """
+        try:
+            response = Data.decode('utf-8')
+            Domoticz.Log(f"Received data from {Connection.Name}: {response[:100]}...")  # Log first 100 chars
+            if Connection.Name == "Get HomeID":
+                self.handle_home_id_response(response)
+            elif Connection.Name == "Get House Number":
+                self.handle_house_number_response(response)
+            elif Connection.Name == "Check Real Time Hardware":
+                self.handle_realtime_hardware_response(response)
+            elif Connection.Name in ["Get Current", "Get MiniMaxMean"]:
+                self.handle_price_data_response(response)
+        except Exception as e:
+            Domoticz.Error(f"Error processing message from {Connection.Name}: {str(e)}")
+
+    def send_home_id_query(self, Connection):
+        """Send query to get HomeID if not provided."""
+        query = {"query": "{viewer{homes{id}}}"}
+        try:
+            Connection.Send({
+                'Verb': 'POST',
+                'URL': '/v1-beta/gql',
+                'Headers': self.headers,
+                'Data': json.dumps(query)
+            })
+            Domoticz.Log("Sent HomeID query")
+        except Exception as e:
+            Domoticz.Error(f"Error sending HomeID query: {str(e)}")
+
+    def send_house_number_query(self, Connection):
+        """Send query to get house number or identifier."""
+        query = {"query": f"{{viewer{{home(id:\"{self.HomeID}\"){{address{{address1}}}}}}}}"}
+        try:
+            Connection.Send({
+                'Verb': 'POST',
+                'URL': '/v1-beta/gql',
+                'Headers': self.headers,
+                'Data': json.dumps(query)
+            })
+            Domoticz.Log("Sent House Number query")
+        except Exception as e:
+            Domoticz.Error(f"Error sending House Number query: {str(e)}")
+
+    def check_realtime_hardware(self, Connection):
+        """Check if real-time hardware is available."""
+        query = {"query": f"{{viewer{{home(id:\"{self.HomeID}\"){{features{{realTimeConsumptionEnabled}}}}}}}}"}
+        try:
+            Connection.Send({
+                'Verb': 'POST',
+                'URL': '/v1-beta/gql',
+                'Headers': self.headers,
+                'Data': json.dumps(query)
+            })
+            Domoticz.Log("Sent Real-Time Hardware check query")
+        except Exception as e:
+            Domoticz.Error(f"Error sending Real-Time Hardware check: {str(e)}")
+
+    def handle_home_id_response(self, response):
+        """Handle response for HomeID query."""
+        try:
+            data = json.loads(response)
+            homes = data.get('data', {}).get('viewer', {}).get('homes', [])
+            if homes:
+                self.HomeID = homes[0].get('id', '')
+                Domoticz.Log(f"Updated HomeID to: {self.HomeID}")
+                if not self.GetHouseNumber.Connected() and not self.GetHouseNumber.Connecting():
+                    self.GetHouseNumber.Connect()
+            else:
+                Domoticz.Error("No HomeID found in response")
+        except Exception as e:
+            Domoticz.Error(f"Error handling HomeID response: {str(e)}")
+
+    def handle_house_number_response(self, response):
+        """Handle response for House Number query."""
+        try:
+            data = json.loads(response)
+            address = data.get('data', {}).get('viewer', {}).get('home', {}).get('address', {}).get('address1', '')
+            if address:
+                Domoticz.Log(f"House address retrieved: {address}")
+            else:
+                Domoticz.Log("No address information available")
+        except Exception as e:
+            Domoticz.Error(f"Error handling House Number response: {str(e)}")
+
+    def handle_realtime_hardware_response(self, response):
+        """Handle response for Real-Time Hardware check."""
+        try:
+            data = json.loads(response)
+            enabled = data.get('data', {}).get('viewer', {}).get('home', {}).get('features', {}).get('realTimeConsumptionEnabled', False)
+            if enabled:
+                Domoticz.Log("Real-time consumption is enabled for this home")
+                if self.CreateRealTime == "Yes" and not self.web_socket_thread:
+                    self.web_socket_thread = threading.Thread(target=self.run_websocket)
+                    self.web_socket_thread.start()
+            else:
+                Domoticz.Log("Real-time consumption is not enabled for this home")
+        except Exception as e:
+            Domoticz.Error(f"Error handling Real-Time Hardware response: {str(e)}")
+
+    def handle_price_data_response(self, response):
+        """Handle response for price data (placeholder as direct API calls are used)."""
+        Domoticz.Log("Price data response received, processing via direct API calls")
+        self.fetch_price_info()
 
     def validate_token(self):
         """
@@ -222,6 +342,7 @@ class BasePlugin:
             "currentL2", "currentL3", "lastMeterProduction"
         ]
         
+        global Devices
         for name in live_measurement_devices:
             if name not in Devices:
                 UpdateDevice(name, "0")
@@ -229,12 +350,32 @@ class BasePlugin:
     def onHeartbeat(self):
         """
         Called periodically by Domoticz to perform tasks on a regular interval.
+        Heartbeat interval is typically every 10 seconds.
         """
         current_time = datetime.now()
-        if self.last_fetch_hour is None or current_time.hour != self.last_fetch_hour:
-            self.last_fetch_hour = current_time.hour
-            Domoticz.Log("Fetching price information on the hour...")
+        should_fetch = False
+        
+        # Update every 15 minutes by default
+        if self.last_fetch_hour is None or current_time.minute % 15 == 0:
+            if self.last_fetch_hour != current_time.hour or self.last_fetch_minute != current_time.minute:
+                self.last_fetch_hour = current_time.hour
+                self.last_fetch_minute = current_time.minute
+                should_fetch = True
+                    
+        if should_fetch:
+            Domoticz.Log(f"Fetching price information at {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
             self.fetch_price_info()
+
+        # Check if WebSocket thread needs to be restarted after rate limit delays
+        if self.CreateRealTime == "Yes" and (self.web_socket_thread is None or not self.web_socket_thread.is_alive()):
+            if self.retry_delay > 0:
+                self.retry_delay -= 10  # Decrease delay by heartbeat interval (10 seconds)
+            if self.retry_delay <= 0:
+                Domoticz.Log("Restarting WebSocket connection after rate limit delay.")
+                self.retry_count = 0
+                self.retry_delay = 5
+                self.web_socket_thread = threading.Thread(target=self.run_websocket)
+                self.web_socket_thread.start()
 
     def fetch_price_info(self):
         """
@@ -335,6 +476,9 @@ class BasePlugin:
 
             except Exception as e:
                 Domoticz.Error(f"WebSocket error: {str(e)}")
+                if self.loop:
+                    self.loop.close()
+                    self.loop = None
                 self.handle_reconnect()
 
     async def websocket_subscription(self):
@@ -348,7 +492,7 @@ class BasePlugin:
                     init_payload={"token": self.AccessToken},
                     headers=self.headers,
                     subprotocols=["graphql-transport-ws"],
-                    ping_interval=10
+                    ping_interval=30  # Increased ping interval to reduce server load
                 )
             ) as session:
                 self.connection_count += 1  # Increment connection count
@@ -386,47 +530,58 @@ class BasePlugin:
                     """
                 )
                 async for result in session.subscribe(query):
-                    for name, value in result["liveMeasurement"].items():
-                        if value is not None:
-                            # Ensure the value is a proper float or int
-                            UpdateDevice(str(name), str(round(float(value), 3)))
-                    self.retry_count = 0  # Reset retry count on successful message receipt
-                    self.retry_delay = 1  # Reset delay on success
+                    if "liveMeasurement" in result:
+                        for name, value in result["liveMeasurement"].items():
+                            if value is not None:
+                                # Ensure the value is a proper float or int
+                                UpdateDevice(str(name), str(round(float(value), 3)))
+                        self.retry_count = 0  # Reset retry count on successful message receipt
+                        self.retry_delay = 5  # Reset delay on success to a higher initial value
                 
         except Exception as e:
             Domoticz.Error(f"WebSocket error during async operation: {str(e)}")
-            self.loop.stop()  # Stop the event loop on error
+            if str(e).find("HTTP 429") != -1:
+                Domoticz.Error("Rate limit exceeded (HTTP 429). Significantly increasing delay before retry.")
+                self.retry_delay = min(self.retry_delay * 5, self.max_retry_delay * 2)  # More aggressive backoff for rate limits
+            if self.loop:
+                self.loop.stop()  # Stop the event loop on error
 
     def handle_reconnect(self):
         """
         Handles reconnecting with exponential backoff and jitter.
+        Increases delay significantly if rate limit (HTTP 429) was encountered to prevent further issues.
         """
         self.retry_count += 1
         self.retry_delay = min(self.max_retry_delay, self.retry_delay * 2)
-        jitter = random.uniform(0, self.retry_delay)
+        jitter = random.uniform(0, self.retry_delay * 1.5)  # Increased jitter range to spread out retries
         self.reconnect_count += 1  # Increment reconnect count
         Domoticz.Log(f"Reconnecting in {jitter:.2f} seconds (Attempt {self.retry_count}/{self.max_retries}). Total reconnects: {self.reconnect_count}")
         time.sleep(jitter)
 
         if self.retry_count >= self.max_retries:
-            Domoticz.Error("Max retries reached, stopping reconnect attempts")
+            Domoticz.Error("Max retries reached, stopping reconnect attempts for now. Will retry on next heartbeat.")
+            self.retry_count = 0  # Reset retry count to allow future attempts
+            self.retry_delay = 300  # Set a long delay before next attempt cycle
             return
 
         # Check if real-time consumption is still enabled
-        self.real_time_enabled = True  # Assuming real-time consumption is still enabled
+        if self.CreateRealTime != "Yes":
+            Domoticz.Log("Real-time consumption disabled, stopping WebSocket reconnect attempts")
+            return
 
     def disconnect_all(self):
         """ Cleanly disconnects all active connections. """
-        if _plugin.GetDataCurrent.Connected() or _plugin.GetDataCurrent.Connecting():
-            _plugin.GetDataCurrent.Disconnect()
-        if _plugin.GetDataMiniMaxMean.Connected() or _plugin.GetDataMiniMaxMean.Connecting():
-            _plugin.GetDataMiniMaxMean.Disconnect()
-        if _plugin.CheckRealTimeHardware.Connected() or _plugin.CheckRealTimeHardware.Connecting():
-            _plugin.CheckRealTimeHardware.Disconnect()
-        if _plugin.GetHomeID.Connected() or _plugin.GetHomeID.Connecting():
-            _plugin.GetHomeID.Disconnect()
-        if _plugin.GetHouseNumber.Connected() or _plugin.GetHouseNumber.Connecting():
-            _plugin.GetHouseNumber.Disconnect()
+        connections = [
+            self.GetDataCurrent, 
+            self.GetDataMiniMaxMean, 
+            self.CheckRealTimeHardware, 
+            self.GetHomeID, 
+            self.GetHouseNumber
+        ]
+        for conn in connections:
+            if conn.Connected() or conn.Connecting():
+                conn.Disconnect()
+                Domoticz.Log(f"Disconnected {conn.Name}")
 
 def UpdateDevice(Name, sValue):
     device_map = {
@@ -479,6 +634,7 @@ def UpdateDevice(Name, sValue):
 
     Type, SubType = type_map.get(UnitType, (243, 31))  # Default to Custom if not mapped
 
+    global Devices
     # Check if device needs to be created
     if ID not in Devices:
         if UnitType == "kWh":
