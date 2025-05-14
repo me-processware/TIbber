@@ -11,7 +11,7 @@ Step 2: Install Python Dependencies
 1. Navigate to the plugin directory:
    cd Tibber
 2. Install the required Python libraries:
-   pip3 install -r requirements.txt
+   pip3 install -r requirements.txt --upgrade (i removed the versions)
 
 Step 3: Restart Domoticz
 1. Restart the Domoticz service to load the new plugin:
@@ -20,7 +20,7 @@ Step 3: Restart Domoticz
 Step 4: Configure the Plugin in Domoticz
 1. In the Domoticz web interface, navigate to Setup > Hardware.
 2. Add a new hardware device.
-3. Select "Tibber 1.01" from the hardware type dropdown list.
+3. Select "Tibber 1.03" from the hardware type dropdown list.
 4. Enter your Tibber Access Token and other parameters as described below, or test with demo first
 5. Click Add.
 
@@ -57,12 +57,6 @@ Parameters
 
 TODO
 
-- Fix Long Shutdown/Delete Times: Improve the shutdown and deletion process to reduce the time it takes to stop or remove the plugin.
-- Type Device Corrections: Ensure that all devices are created and updated correctly.
-- Tibber API Compliance: Double-check to ensure that all interactions with the Tibber API follow their guidelines and rules.
-  
-work in progres:
-  - Construct a P1 from Devices: Create a feature that consolidates data from multiple devices into a P1 meter-like functionality.
-  - Charging Mechanism: Develop a mechanism that allows users to select the cheapest hours to charge devices such as electric cars, batteries, or other energy storage systems.
+- No further development, only bugfixes en maintaining support due to new plugin tibber-charge currently in beta to charge my home battery as efficient as possible. want to test? contact me.
 
 tips improvements or additions are welcome please let me know
