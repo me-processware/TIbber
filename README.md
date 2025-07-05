@@ -51,7 +51,7 @@ The default Tibber Access Token is a demo copied from https://developer.tibber.c
 Parameters
 
 - Tibber Access Token: (Required) The access token for authenticating with Tibber API.
-- Home ID: (Optional) The Home ID for the associated Tibber account.
+- Home ID: (Required) The Home ID for the associated Tibber account.
 - Create device for Pulse/Watty: (Optional) Option to create a device for Pulse/Watty.
 - Enable Logging: (Optional) Option to enable or disable logging.
 
